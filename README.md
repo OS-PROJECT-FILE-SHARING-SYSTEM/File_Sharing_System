@@ -17,5 +17,7 @@ Develop a File Sharing Platform which enables users to upload and download (Larg
 -A multithreaded platform
 
 ****To run the file sharing system:
-gcc servers.c -lpthread
-gcc clients.c -lcrypt
+
+gcc servers3.c -lpthread
+
+gcc clients3.c -lcrypt
