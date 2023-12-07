@@ -11,10 +11,12 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include<pthread.h>
 #include <netinet/tcp.h>
 
 
-#define MAX_FILENAME_LEN 256
+#define FIVE_GB_IN_BYTES (5ULL*1024ULL * 1024ULL * 1024ULL)
+#define MAX_FILENAME_LEN FIVE_GB_IN_BYTES
 #define STORAGE_DIRECTORY "./clientfiles/"
 char salt[] = "12";
 struct FileInfo {
@@ -24,7 +26,10 @@ struct FileInfo {
     char uploader[256];
     char last_downloader[256];
     int num_downloads;
-    int download_status; // 0 for not downloaded, 100 for fully downloaded
+};
+struct DownloadStatus {
+    char filename[256];
+    double download_progress;
 };
 void displayMenu() {
     printf("\n----- Menu -----\n");
@@ -33,8 +38,9 @@ void displayMenu() {
     printf("3. Display All Files\n");
     printf("4. Display my Uploaded Files\n");
     printf("5. Remove File\n");
-    printf("6. Manage Account (Change Password)\n");
-    printf("7. Exit\n");
+    printf("6. Display my Downloaded Files\n");
+    printf("7. Manage Account (Change Password)\n");
+    printf("8. Exit\n");
     printf("Enter your choice: ");
 }
 void displayLog()
@@ -53,13 +59,13 @@ void hPassword(const char* password, char* hashedPassword) {
 }
 
 int isValidUsername(const char* username) {
-    // Check if the username contains only alphanumeric characters
+   
     for (int i = 0; username[i] != '\0'; i++) {
         if (!isalnum(username[i])) {
-            return 0; // Invalid username
+            return 0; 
         }
     }
-    return 1; // Valid username
+    return 1; 
 }
 void registerNewAccount(int client_socket) {
     char username[256];
@@ -76,7 +82,7 @@ void registerNewAccount(int client_socket) {
         {
             printf("Enter your new username: ");
             scanf("%s", username);
-            // Check the validity of the username
+            
             if (!isValidUsername(username)) {
                 printf("Invalid username format. Please use alphanumeric characters only.\n");
             }
@@ -91,7 +97,7 @@ void registerNewAccount(int client_socket) {
         hPassword(newPassword, hashedPassword);
         // Send username and hashed password to the server for registration
         send(client_socket, username, sizeof(username), 0);
-        //send(client_socket, salt, sizeof(salt), 0);
+       
         send(client_socket, hashedPassword, sizeof(hashedPassword), 0);
         char registrationResult[256];
         recv(client_socket, registrationResult, sizeof(registrationResult), 0);
@@ -153,7 +159,7 @@ int main() {
                     send(client_socket, hashedPassword, sizeof(hashedPassword), 0);
                     char authResult[1];
                     recv(client_socket,authResult,sizeof(authResult),0);
-                    //printf("%s\n", authResult);
+                    
                     if (authResult[0] == '1') {
                         printf("Login successful!\n");
                         loggedIn = 1;
@@ -165,7 +171,7 @@ int main() {
                     send(client_socket, command, sizeof(command), 0);
                     registerNewAccount(client_socket);
                     break;
-            case 3: // Exit the program
+            case 3: 
                     close(client_socket);
                     exit(EXIT_SUCCESS);
             default: printf("Invalid choice. Please try again.\n");
@@ -175,23 +181,26 @@ int main() {
         char downloadCommand[256] = "download";
         char uploadCommand[256] = "upload";
         char listCommand[256] = "list";
+        char downloadListCommand[256] = "downloadlist";
         char removeCommand[256] = "remove";
         char changePasswordCommand[256]="changepassword";
         char exitCommand[256]="exit";
         char filename[256];
-        char buffer[1024];
+        char* buffer;
         char full_path[512];
         char newPassword[256];
         int num_files;
+        int num_downloads;
         int error;
+        int download=0;
+        int upload=0;
         while (1) {
-            memset(buffer, 0, sizeof(buffer));
             memset(full_path, 0, sizeof(full_path));
             displayMenu();
             scanf("%d", &choice);
 
             switch (choice) {
-                case 1: int download=0;
+                case 1: download=0;
                         send(client_socket, downloadCommand, sizeof(downloadCommand), 0);
                         while(!download)
                         {
@@ -213,32 +222,76 @@ int main() {
 
                         }
                         snprintf(full_path, sizeof(full_path), "%s%s", STORAGE_DIRECTORY, filename);
+                        
+                        clock_t start_time = clock();
+                        clock_t time_start=start_time;
+
                         // Receive the file size
                         long file_size;
                         recv(client_socket, &file_size, sizeof(long),0);
+                        long size=file_size;
 
-                        // Receive the file data
-                        FILE *file = fopen(full_path, "wb");
+                        // Check if the file already exists for resumable download
+                        long start_point = 0;
+                        FILE* file = fopen(full_path, "ab");
+                        if (file != NULL) {
+                            fseek(file, 0, SEEK_END);
+                            start_point = ftell(file);
+                            fclose(file);
+                        }
+                        file_size -= start_point;
+                        // Send the starting point to the server
+                        send(client_socket, &start_point, sizeof(long), 0);
+
+                        // Open the file for writing (append mode)
+                        file = fopen(full_path, "ab");
                         if (file == NULL) {
-                            perror("Error opening file");
+                            perror("Error opening file for writing");
+                        }
+
+                        // Allocate buffer dynamically based on file size
+                        buffer = (char *)malloc(file_size);
+                        if (buffer == NULL) {
+                            perror("Error allocating memory for buffer");
+                            fclose(file);
+                            return 1;
                         }
 
                         int bytes_received;
+                        double download_percentage = 0.0;
+
                         while (file_size > 0) {
                             bytes_received = recv(client_socket, buffer, sizeof(buffer),0);
                             fwrite(buffer, 1, bytes_received, file);
                             file_size -= bytes_received;
+
+                            // Calculate and display download speed every 1 second
+                            clock_t current_time = clock();
+                            double elapsed_time = (double)(current_time - start_time) / CLOCKS_PER_SEC;
+                            if (elapsed_time >= 1.0) {
+                                double time_elapsed=(double)(current_time - time_start) / CLOCKS_PER_SEC;
+                                double download_speed = ftell(file) / time_elapsed;
+                                download_percentage = ((double)ftell(file) / (double)(size)) * 100.0;
+                                printf("Download Speed: %.2f bytes/second\n", download_speed);
+                                printf("Download Percentage: %.2f%%\n",download_percentage);
+                                start_time = clock();
+                            }
                         }
+                        clock_t end_time = clock();
 
-                        printf("File '%s' downloaded successfully.\n", filename);
+                        // Calculate and display download speed
+                        double download_time = (double)(end_time - time_start) / CLOCKS_PER_SEC;
+                        double download_speed = size / download_time;
 
+                        printf("File '%s' downloaded successfully. Download speed: %.2f bytes/second\n", filename, download_speed);
+
+                        free(buffer);
                         fclose(file);
                         break;
 
                 case 2:
-                    // Logic for uploading file
-                    // Inside the case 2 block (Upload File)
-                    int upload=0;
+                    
+                    upload=0;
                     send(client_socket, uploadCommand, sizeof(uploadCommand), 0);
                     while(!upload)
                     {
@@ -259,6 +312,9 @@ int main() {
                     recv(client_socket, &error, sizeof(int), 0);
                     if(!error)
                     {
+                        clock_t start_time = clock();
+                        clock_t time_start=start_time;
+
                         // Send the file size first
                         FILE *file1 = fopen(full_path, "rb");
                         if (file1 == NULL) {
@@ -271,27 +327,53 @@ int main() {
 
                         send(client_socket, &file_size1, sizeof(long),0);
 
+                        // Allocate buffer dynamically based on file size
+                        buffer = (char *)malloc(file_size1);
+                        if (buffer == NULL) {
+                            perror("Error allocating memory for buffer");
+                            fclose(file1);
+                            return 1;
+                        }
+
                         int bytes_read;
                         while ((bytes_read = fread(buffer, 1, sizeof(buffer), file1)) > 0) {
                             send(client_socket, buffer, bytes_read,0);
+
+                            // Calculate and display upload speed every 1 second
+                            clock_t current_time = clock();
+                            double elapsed_time = (double)(current_time - start_time) / CLOCKS_PER_SEC;
+                            if (elapsed_time >= 1.0) {
+                                double time_elapsed=(double)(current_time - time_start) / CLOCKS_PER_SEC;
+                                double upload_speed = ftell(file1) / time_elapsed;
+                                printf("Upload Speed: %.2f bytes/second\n", upload_speed);
+                                start_time = clock();
+                            }
                         }
 
-                        printf("File '%s' uploaded successfully.\n",filename);
+                        clock_t end_time = clock();
 
+                        // Calculate and display upload speed
+                        double upload_time = (double)(end_time - time_start) / CLOCKS_PER_SEC;
+                        double upload_speed = file_size1 / upload_time;
+
+                        printf("File '%s' uploaded successfully. Upload speed: %.2f bytes/second\n", filename, upload_speed);
+
+                        free(buffer);
                         fclose(file1);
 
                     }
                     else
                         printf("File '%s' already exists in server.Rename the file to upload!\n", filename);
+
                     break;
                 case 3:
                         // Send the list command to the server
                         send(client_socket, listCommand, sizeof(listCommand), 0);
                         recv(client_socket, &num_files, sizeof(int), 0);
                         printf("\n");
-                        printf("%-15s | %-10s | %-20s | %-15s | %-15s | %-10s | %-10s\n",
-                                   "File Name", "Size (bytes)", "Last Modified", "Uploader", "Last Downloader", "Downloads", "Status");
-                        printf("---------------------------------------------------------------------------------------------------------------\n");
+                        printf("%-15s | %-10s | %-20s | %-15s | %-15s | %-10s\n",
+                                   "File Name", "Size (bytes)", "Last Modified", "Uploader", "Last Downloader", "Downloads");
+                        printf("---------------------------------------------------------------------------------------------------------\n");
 
                         // Receive and print individual FileInfo structures
                         for (int i = 0; i < num_files; i++) {
@@ -305,9 +387,9 @@ int main() {
                             char* timestamp = ctime(&file_info.last_modified);
                             timestamp[strcspn(timestamp, "\n")] = '\0';  // Remove the newline character
 
-                            printf("%-15s | %-10ld | %-20s | %-15s | %-15s | %-10d | %-10d\n",
+                            printf("%-15s | %-10ld | %-20s | %-15s | %-15s | %-10d\n",
                                    file_info.filename, file_info.size, timestamp,
-                                   file_info.uploader, file_info.last_downloader, file_info.num_downloads, file_info.download_status);
+                                   file_info.uploader, file_info.last_downloader, file_info.num_downloads);
 
                         }
                     break;
@@ -315,9 +397,9 @@ int main() {
                         // Send the list command to the server
                         send(client_socket, listCommand, sizeof(listCommand), 0);
                         recv(client_socket, &num_files, sizeof(int), 0);
-                        printf("%-15s | %-10s | %-20s | %-15s | %-15s | %-10s | %-10s\n",
-                                   "File Name", "Size (bytes)", "Last Modified", "Uploader", "Last Downloader", "Downloads", "Status");
-                        printf("---------------------------------------------------------------------------------------------------------------\n");
+                        printf("%-15s | %-10s | %-20s | %-15s | %-15s | %-10s\n",
+                                   "File Name", "Size (bytes)", "Last Modified", "Uploader", "Last Downloader", "Downloads");
+                        printf("--------------------------------------------------------------------------------------------------------\n");
 
                         // Receive and print individual FileInfo structures
                         for (int i = 0; i < num_files; i++) {
@@ -333,9 +415,9 @@ int main() {
                                 char* timestamp = ctime(&file_info.last_modified);
                                 timestamp[strcspn(timestamp, "\n")] = '\0';  // Remove the newline character
 
-                                printf("%-15s | %-10ld | %-20s | %-15s | %-15s | %-10d | %-10d\n",
+                                printf("%-15s | %-10ld | %-20s | %-15s | %-15s | %-10d\n",
                                        file_info.filename, file_info.size, timestamp,
-                                       file_info.uploader, file_info.last_downloader, file_info.num_downloads, file_info.download_status);
+                                       file_info.uploader, file_info.last_downloader, file_info.num_downloads);
 
                             }
                             else
@@ -351,14 +433,35 @@ int main() {
                         recv(client_socket, &error, sizeof(int), 0);
 
                         if (!error) {
-                            // File not found on the server, handle this case
+                           
                             printf("File not found on the server or is not uploaded by you.\n");
                         }
-                        else
+                        else{
                             printf("File %s removed successfully\n",filename);
-
+                        }
                         break;
-                case 6:
+
+                case 6: // Send the list command to the server
+                        send(client_socket, downloadListCommand, sizeof(downloadListCommand), 0);
+                        recv(client_socket, &num_downloads, sizeof(int), 0);
+                        printf("\n");
+                        printf("%-20s | %-10s\n","File Name", "Download Status(in %)");
+                        printf("--------------------------------------------------\n");
+
+                        // Receive and print individual FileInfo structures
+                        for (int i = 0; i < num_downloads; i++) {
+                            struct DownloadStatus download_info;
+                            bytes_received = recv(client_socket, &download_info, sizeof(struct DownloadStatus), 0);
+
+                            if (bytes_received <= 0) {
+                                perror("Error receiving file information");
+                                break;
+                            }
+                            printf("%-20s | %-.1f%%\n",download_info.filename, download_info.download_progress);
+
+                        }
+                        break;
+                case 7:
                     // Logic for managing account (change password)
                 
                     send(client_socket, changePasswordCommand, sizeof(changePasswordCommand), 0);
@@ -372,9 +475,9 @@ int main() {
                     char changeResult[256];
                     recv(client_socket, changeResult, sizeof(changeResult), 0);
                     printf("%s\n", changeResult);
-                    // ...
+                   
                     break;
-                case 7:
+                case 8:
                     // Exit the program
                     send(client_socket, exitCommand, sizeof(exitCommand), 0);
                     close(client_socket);
