@@ -17,6 +17,7 @@
 #define MAX_USERS 500
 #define MAX_FILES 200
 #define FILE_STORAGE_DIRECTORY "./files/"
+#define MAX_DOWNLOADS 50
 
 sem_t *mutex_file;
 sem_t *mutex_user;
@@ -34,6 +35,12 @@ struct AdministratorCredentials {
     char username[256];
     char hashedPassword[256];
 };
+
+struct DownloadStatus {
+    char filename[256];
+    double download_progress;
+};
+
 struct FileInfo {
     char filename[256];
     long size;
@@ -41,13 +48,43 @@ struct FileInfo {
     char uploader[256];
     char last_downloader[256];
     int num_downloads;
-    int download_status; // 0 for not downloaded, 100 for fully downloaded
 };
+
 struct FileInfo file_info_list[MAX_FILES]; // adjust as needed
 int num_files = 0;
 int numUsers=0;
 struct Credentials userCredentials[MAX_USERS];
 struct AdministratorCredentials adminCredentials = {"admin", "3456"};
+
+void saveDownloadStatusToFile(const char *username,struct DownloadStatus *download_status_list, int num_downloads) {
+    char filepath[512];
+    snprintf(filepath, sizeof(filepath), "%s%s.txt", FILE_STORAGE_DIRECTORY,username);
+    FILE *file = fopen(filepath, "w");
+    if (file == NULL) {
+        perror("Error opening client download status file");
+        return;
+    }
+
+    for (int i = 0; i < num_downloads; i++) {
+        fprintf(file, "%s %lf\n", download_status_list[i].filename, download_status_list[i].download_progress);
+    }
+
+    fclose(file);
+}
+
+void loadDownloadStatusFromFile(char *username,struct DownloadStatus *download_status_list, int *num_downloads) {
+    char filepath[512];
+    snprintf(filepath, sizeof(filepath), "%s%s.txt", FILE_STORAGE_DIRECTORY,username);
+    FILE *file = fopen(filepath, "r");
+    if (file == NULL) {
+        printf("Download status file not found. No data loaded.\n");
+        return;
+    }
+    while (fscanf(file, "%s %lf", download_status_list[*num_downloads].filename, &download_status_list[*num_downloads].download_progress) == 2) {
+        (*num_downloads)++; // Increment the number of downloads
+    }
+    fclose(file);
+}
 
 void saveCredentialsToFile() {
     char filepath[512];
@@ -74,14 +111,13 @@ void saveFileInfoListToFile() {
     }
 
     for (int i = 0; i < num_files; i++) {
-        fprintf(file, "%s %ld %ld %s %s %d %d\n",
+        fprintf(file, "%s %ld %ld %s %s %d\n",
                 file_info_list[i].filename,
                 file_info_list[i].size,
                 file_info_list[i].last_modified,
                 file_info_list[i].uploader,
                 file_info_list[i].last_downloader,
-                file_info_list[i].num_downloads,
-                file_info_list[i].download_status);
+                file_info_list[i].num_downloads);
     }
 
     fclose(file);
@@ -97,14 +133,13 @@ void loadFileInfoListFromFile() {
     }
 
     while (num_files < sizeof(file_info_list) / sizeof(file_info_list[0]) &&
-           fscanf(file, "%s %ld %ld %s %s %d %d",
+           fscanf(file, "%s %ld %ld %s %s %d",
                   file_info_list[num_files].filename,
                   &file_info_list[num_files].size,
                   &file_info_list[num_files].last_modified,
                   file_info_list[num_files].uploader,
                   file_info_list[num_files].last_downloader,
-                  &file_info_list[num_files].num_downloads,
-                  &file_info_list[num_files].download_status) == 7) {
+                  &file_info_list[num_files].num_downloads) == 6) {
         num_files++;
     }
 
@@ -126,17 +161,45 @@ void loadCredentialsFromFile() {
 
     fclose(file);
 }
-void updateFileInfo(const char *filename, const char *uploader, int download_status) {
+
+void updateFileInfo(const char *filename, const char *uploader) {
     for (int i = 0; i < num_files; i++) {
         if (strcmp(filename, file_info_list[i].filename) == 0) {
             file_info_list[i].num_downloads++;
-            file_info_list[i].download_status = download_status;
             strncpy(file_info_list[i].last_downloader, uploader, sizeof(file_info_list[i].last_downloader));
             file_info_list[i].last_modified = time(NULL);
             break;
         }
     }
 }
+
+void updateDownloadStatus(const char *filename,const char *username,double download_status,struct DownloadStatus *download_status_list, int *num_downloads) {
+    int new=1;
+    for (int i = 0; i < (*num_downloads); i++) {
+        if (strcmp(filename, download_status_list[i].filename) == 0) {
+            // Update download status for the specified client
+            download_status_list[i].download_progress = download_status;
+
+            // Save the updated status to the file
+            saveDownloadStatusToFile(username,download_status_list,*num_downloads);
+            new=0;
+            break;
+        }
+    }
+    if(new)
+    {
+        // Create a new structure
+        if ((*num_downloads) < sizeof(download_status_list) / sizeof(download_status_list[0])) {
+            strncpy(download_status_list[*num_downloads].filename, filename, sizeof(download_status_list[*num_downloads].filename));
+            download_status_list[*num_downloads].download_progress = download_status;
+            (*num_downloads)++;
+            saveDownloadStatusToFile(username,download_status_list,*num_downloads);
+        } else {
+            printf("Maximum number of downloads reached.\n");
+        }
+    }
+}
+
 int handleRemoveFile(int client_socket,char *username) {
     char filepath[512];  // Assumes the maximum directory path length
     char filename[256];
@@ -177,7 +240,8 @@ int handleRemoveFile(int client_socket,char *username) {
     sem_post(mutex_file);
     return 0; // File not found
 }
-void handleFileDownload(int client_socket,char *username) {
+
+void handleFileDownload(int client_socket,char *username,struct DownloadStatus *download_status_list, int *num_downloads) {
     char filename[256];
     int error=0;
     char errorMessage[1];
@@ -204,7 +268,9 @@ void handleFileDownload(int client_socket,char *username) {
         sem_post(mutex_file);
 
     }
+    clock_t start_time = clock();
     sem_wait(mutex_file);
+
     // Send the file size first
     FILE *file = fopen(filepath, "rb");
     if (file == NULL) {
@@ -217,20 +283,65 @@ void handleFileDownload(int client_socket,char *username) {
 
     send(client_socket, &file_size, sizeof(long),0);
 
-    char buffer[1024];
+    // Receive the starting point of the download
+    long start_point;
+    recv(client_socket, &start_point, sizeof(long), 0);
+
+    // Move the file pointer to the starting point
+    fseek(file, start_point, SEEK_SET);
+
+    // Dynamically allocate buffer based on file size
+    char *buffer = (char *)malloc(file_size);
+    if (buffer == NULL) {
+        perror("Error allocating memory for buffer");
+        fclose(file);
+        sem_post(mutex_file);
+        return; // Exit the function
+    }
+
     int bytes_read;
+    int total_bytes_sent = start_point;
+    ssize_t bytes_sent;
     while ((bytes_read = fread(buffer, 1, sizeof(buffer), file)) > 0) {
-        send(client_socket, buffer, bytes_read,0);
+        bytes_sent=send(client_socket, buffer, bytes_read,0);
+
+        total_bytes_sent += bytes_read;
+
+        // Check for client disconnection
+        if (bytes_sent < 0) {
+            // Handle cleanup, update FileInfo structure, etc.
+            double download_progress = ((double)total_bytes_sent / file_size) * 100.0;
+
+            fclose(file);
+            free(buffer);
+            updateDownloadStatus(filename,username,download_progress,download_status_list,num_downloads);
+            sem_post(mutex_file);
+            printf("Download is disrupted\n");
+            // Exit the function or thread gracefully
+            // Client disconnected
+            close(client_socket);
+            pthread_exit(NULL);
+        }
     }
 
     fclose(file);
+    free(buffer);
+
+    clock_t end_time = clock();
+
+    // Calculate and display download speed
+    double download_time = (double)(end_time - start_time) / CLOCKS_PER_SEC;
+    double download_speed = file_size / download_time;
+
     // Update the FileInfo structure for the downloaded file
-    updateFileInfo(filename, username, 100); // Assuming download_status of 100
+    updateDownloadStatus(filename,username, 100.0,download_status_list,num_downloads);
+    updateFileInfo(filename, username); // Assuming download_status of 100
     saveFileInfoListToFile();
     sem_post(mutex_file);
-    printf("File '%s' sent to client.\n", filename);
-
+    
+    printf("File '%s' sent to client. Download speed: %.2f bytes/second\n", filename, download_speed);
 }
+
 void handleFileList(int client_socket) {
     sem_wait(mutex_file);
     int num_files_to_send = num_files;
@@ -246,6 +357,21 @@ void handleFileList(int client_socket) {
     printf("File details sent to client.\n");
 }
 
+void handleDownloadFileList(int client_socket,struct DownloadStatus *download_status_list, int num_downloads) {
+    sem_wait(mutex_file);
+    int num_downloads_to_send = num_downloads;
+
+    // Send the number of files to the client
+    send(client_socket, &num_downloads_to_send, sizeof(int), 0);
+
+    for (int i = 0; i < num_downloads; i++) {
+        send(client_socket, &download_status_list[i], sizeof(struct DownloadStatus), 0);
+    }
+    sem_post(mutex_file);
+
+    printf("Download file details sent to client.\n");
+}
+
 
 void handleFileUpload(int client_socket,char *uploader) {
     char filename[256];
@@ -254,6 +380,7 @@ void handleFileUpload(int client_socket,char *uploader) {
     snprintf(full_path, sizeof(full_path), "%s%s", FILE_STORAGE_DIRECTORY, filename);
     int error=0;
 
+    clock_t start_time = clock();
     sem_wait(mutex_file);
 
     // Check if the file already exists in the directory
@@ -269,12 +396,21 @@ void handleFileUpload(int client_socket,char *uploader) {
     long file_size;
     recv(client_socket, &file_size, sizeof(long),0);
     long size=file_size;
+
+    // Dynamically allocate buffer based on file size
+    char *buffer = (char *)malloc(file_size);
+    if (buffer == NULL) {
+        perror("Error allocating memory for buffer");
+        sem_post(mutex_file);
+        return; // Exit the function
+    }
+
     // Receive the file data
     FILE *file = fopen(full_path, "wb");
     if (file == NULL) {
         perror("Error opening file");
     }
-    char buffer[1024];
+    
     int bytes_received;
     while (file_size > 0) {
         bytes_received = recv(client_socket, buffer, sizeof(buffer),0);
@@ -283,6 +419,13 @@ void handleFileUpload(int client_socket,char *uploader) {
     }
 
     fclose(file);
+    free(buffer);
+
+    clock_t end_time = clock();
+
+    // Calculate and display upload speed
+    double upload_time = (double)(end_time - start_time) / CLOCKS_PER_SEC;
+    double upload_speed = size / upload_time;
 
     // Create a new FileInfo structure for the uploaded file
     if (num_files < sizeof(file_info_list) / sizeof(file_info_list[0])) {
@@ -292,14 +435,14 @@ void handleFileUpload(int client_socket,char *uploader) {
         strncpy(file_info_list[num_files].uploader, uploader, sizeof(file_info_list[num_files].uploader));
         strncpy(file_info_list[num_files].last_downloader, "None", sizeof(file_info_list[num_files].last_downloader));
         file_info_list[num_files].num_downloads = 0;
-        file_info_list[num_files].download_status = 0;
         num_files++;
     } else {
         printf("Maximum number of files reached.\n");
     }
     saveFileInfoListToFile();
+    
     sem_post(mutex_file);
-    printf("File '%s' uploaded successfully.\n", filename);
+    printf("File '%s' uploaded successfully. Upload speed: %.2f bytes/second\n", filename, upload_speed);
 }
 
 void handleRegistration(int client_socket) {
@@ -313,7 +456,7 @@ void handleRegistration(int client_socket) {
         char password[256];
         recv(client_socket, username, sizeof(username), 0);
         recv(client_socket, password, sizeof(password), 0);
-        // Store the new user's data 
+        
         strcpy(userCredentials[numUsers].username, username);
         strcpy(userCredentials[numUsers].hashedPassword, password);
         numUsers++; // Increment the number of registered users
@@ -394,7 +537,7 @@ void* handleClient(void* arg) {
     while(!login)
     {
         memset(command, 0, sizeof(command));
-        //printf("yp\n");
+        
         recv(client_socket, command, sizeof(command), 0);
         //printf("%s\n",command);
         if(strcmp(command, "login") == 0) {
@@ -411,6 +554,9 @@ void* handleClient(void* arg) {
                     authResultStr[0] = '1';
                     //printf("%s\n",authResultStr);
                     send(client_socket, authResultStr, sizeof(authResultStr), 0);
+                    struct DownloadStatus download_status_list[MAX_DOWNLOADS]; // adjust as needed
+                    int num_downloads = 0;
+                    loadDownloadStatusFromFile(username,download_status_list,&num_downloads);
                     while(1)
                     {
                         memset(command, 0, sizeof(command));
@@ -420,10 +566,13 @@ void* handleClient(void* arg) {
                             handleFileUpload(client_socket,username);
                         } 
                         else if (strcmp(command, "download") == 0) {
-                            handleFileDownload(client_socket,username);
+                            handleFileDownload(client_socket,username,download_status_list,&num_downloads);
                         } 
                         else if (strcmp(command, "list") == 0) {
                             handleFileList(client_socket);
+                        }
+                        else if (strcmp(command, "downloadlist") == 0) {
+                            handleDownloadFileList(client_socket,download_status_list,num_downloads);
                         } 
                         else if (strcmp(command, "changepassword") == 0) {
                             char new_password[256];
@@ -462,7 +611,7 @@ void* handleClient(void* arg) {
         }
     }
 
- // Client disconnected, clean up and exit the thread
+ // Client disconnected
     close(client_socket);
     free(clientInfo);
     pthread_exit(NULL);
