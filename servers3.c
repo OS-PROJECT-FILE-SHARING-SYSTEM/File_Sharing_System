@@ -14,6 +14,7 @@
 
 #define MUTEXFILE "/sem-mutex1"
 #define MUTEXUSER "/sem-mutex2"
+#define MUTEXDISPLAY "/sem-mutex3"
 #define MAX_USERS 500
 #define MAX_FILES 200
 #define FILE_STORAGE_DIRECTORY "./files/"
@@ -21,6 +22,7 @@
 
 sem_t *mutex_file;
 sem_t *mutex_user;
+sem_t *mutex_display;
 
 struct ClientInfo {
     int socket;
@@ -56,7 +58,7 @@ int numUsers=0;
 struct Credentials userCredentials[MAX_USERS];
 struct AdministratorCredentials adminCredentials = {"admin", "3456"};
 
-void saveDownloadStatusToFile(const char *username,struct DownloadStatus *download_status_list, int num_downloads) {
+void saveDownloadStatusToFile(const char *username,struct DownloadStatus *download_status_list, int *num_downloads) {
     char filepath[512];
     snprintf(filepath, sizeof(filepath), "%s%s.txt", FILE_STORAGE_DIRECTORY,username);
     FILE *file = fopen(filepath, "w");
@@ -65,10 +67,10 @@ void saveDownloadStatusToFile(const char *username,struct DownloadStatus *downlo
         return;
     }
 
-    for (int i = 0; i < num_downloads; i++) {
+    for (int i = 0; i < *num_downloads; i++) {
         fprintf(file, "%s %lf\n", download_status_list[i].filename, download_status_list[i].download_progress);
     }
-
+    //printf("SAVE\n");
     fclose(file);
 }
 
@@ -83,6 +85,7 @@ void loadDownloadStatusFromFile(char *username,struct DownloadStatus *download_s
     while (fscanf(file, "%s %lf", download_status_list[*num_downloads].filename, &download_status_list[*num_downloads].download_progress) == 2) {
         (*num_downloads)++; // Increment the number of downloads
     }
+    //printf("LOAD\n");
     fclose(file);
 }
 
@@ -181,7 +184,7 @@ void updateDownloadStatus(const char *filename,const char *username,double downl
             download_status_list[i].download_progress = download_status;
 
             // Save the updated status to the file
-            saveDownloadStatusToFile(username,download_status_list,*num_downloads);
+            saveDownloadStatusToFile(username,download_status_list,num_downloads);
             new=0;
             break;
         }
@@ -189,15 +192,16 @@ void updateDownloadStatus(const char *filename,const char *username,double downl
     if(new)
     {
         // Create a new structure
-        if ((*num_downloads) < sizeof(download_status_list) / sizeof(download_status_list[0])) {
+        if ((*num_downloads) < MAX_DOWNLOADS) {
             strncpy(download_status_list[*num_downloads].filename, filename, sizeof(download_status_list[*num_downloads].filename));
             download_status_list[*num_downloads].download_progress = download_status;
             (*num_downloads)++;
-            saveDownloadStatusToFile(username,download_status_list,*num_downloads);
+            saveDownloadStatusToFile(username,download_status_list,num_downloads);
         } else {
             printf("Maximum number of downloads reached.\n");
         }
     }
+    //printf("UPDATE\n");
 }
 
 int handleRemoveFile(int client_socket,char *username) {
@@ -218,7 +222,8 @@ int handleRemoveFile(int client_socket,char *username) {
                     sem_post(mutex_file);
                     return 0; // Error deleting the file
                 }
-
+                sem_post(mutex_file);
+                sem_wait(mutex_display);
                 // Remove the corresponding entry from fileStorage
                 for (int j = i; j < num_files - 1; j++) {
                     file_info_list[j] = file_info_list[j + 1];
@@ -227,7 +232,7 @@ int handleRemoveFile(int client_socket,char *username) {
                 memset(&file_info_list[num_files - 1], 0, sizeof(struct FileInfo));
                 num_files--;
                 saveFileInfoListToFile();
-                sem_post(mutex_file);
+                sem_post(mutex_display);
                 return 1; // File removed successfully
 
             }
@@ -335,15 +340,17 @@ void handleFileDownload(int client_socket,char *username,struct DownloadStatus *
 
     // Update the FileInfo structure for the downloaded file
     updateDownloadStatus(filename,username, 100.0,download_status_list,num_downloads);
+    sem_post(mutex_file);
+    sem_wait(mutex_display);
     updateFileInfo(filename, username); // Assuming download_status of 100
     saveFileInfoListToFile();
-    sem_post(mutex_file);
+    sem_post(mutex_display);
     
     printf("File '%s' sent to client. Download speed: %.2f bytes/second\n", filename, download_speed);
 }
 
 void handleFileList(int client_socket) {
-    sem_wait(mutex_file);
+    sem_wait(mutex_display);
     int num_files_to_send = num_files;
 
     // Send the number of files to the client
@@ -352,7 +359,7 @@ void handleFileList(int client_socket) {
     for (int i = 0; i < num_files; i++) {
         send(client_socket, &file_info_list[i], sizeof(struct FileInfo), 0);
     }
-    sem_post(mutex_file);
+    sem_post(mutex_display);
 
     printf("File details sent to client.\n");
 }
@@ -426,7 +433,8 @@ void handleFileUpload(int client_socket,char *uploader) {
     // Calculate and display upload speed
     double upload_time = (double)(end_time - start_time) / CLOCKS_PER_SEC;
     double upload_speed = size / upload_time;
-
+    sem_post(mutex_file);
+    sem_wait(mutex_display);
     // Create a new FileInfo structure for the uploaded file
     if (num_files < sizeof(file_info_list) / sizeof(file_info_list[0])) {
         strncpy(file_info_list[num_files].filename, filename, sizeof(file_info_list[num_files].filename));
@@ -441,7 +449,7 @@ void handleFileUpload(int client_socket,char *uploader) {
     }
     saveFileInfoListToFile();
     
-    sem_post(mutex_file);
+    sem_post(mutex_display);
     printf("File '%s' uploaded successfully. Upload speed: %.2f bytes/second\n", filename, upload_speed);
 }
 
@@ -556,7 +564,9 @@ void* handleClient(void* arg) {
                     send(client_socket, authResultStr, sizeof(authResultStr), 0);
                     struct DownloadStatus download_status_list[MAX_DOWNLOADS]; // adjust as needed
                     int num_downloads = 0;
+                    sem_wait(mutex_file);
                     loadDownloadStatusFromFile(username,download_status_list,&num_downloads);
+                    sem_post(mutex_file);
                     while(1)
                     {
                         memset(command, 0, sizeof(command));
@@ -678,16 +688,17 @@ int main() {
     
 
     printf("Primary Server listening on port 12345...\n");
-     mutex_file = sem_open (MUTEXFILE, O_CREAT, 0660, 1);
+    mutex_file = sem_open (MUTEXFILE, O_CREAT, 0660, 1);
     mutex_user = sem_open (MUTEXUSER, O_CREAT, 0660, 1);
+    mutex_display = sem_open (MUTEXDISPLAY, O_CREAT, 0660, 1);
 
     sem_wait(mutex_user);
     loadCredentialsFromFile();
     sem_post(mutex_user);
 
-    sem_wait(mutex_file);
+    sem_wait(mutex_display);
     loadFileInfoListFromFile();
-    sem_post(mutex_file);
+    sem_post(mutex_display);
 
     while (1) {
         int primary_client_socket = accept(primary_server_socket, (struct sockaddr*)&primary_server_addr, &client_addr_len);
@@ -709,9 +720,11 @@ int main() {
     }
        
     sem_close (mutex_file);
+    sem_close (mutex_display);
     sem_close (mutex_user);
     
     sem_unlink (MUTEXFILE);
+    sem_unlink (MUTEXDISPLAY);
     sem_unlink (MUTEXUSER);
     // Close server sockets
     close(primary_server_socket);
