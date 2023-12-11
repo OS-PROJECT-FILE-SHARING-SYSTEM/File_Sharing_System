@@ -23,5 +23,5 @@ gcc servers3.c -lpthread
 gcc clients3.c -lcrypt
 
 
-To see the presentation vedio and working vedio click on the link--->
+To see the presentation and working code video click on the link--->
 https://drive.google.com/drive/folders/1Lxol_-YLT7rdHzYxto30vjkXGYgRn7Ws?usp=sharing
