@@ -5,7 +5,7 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <crypt.h>
-#include<ctype.h>
+#include <ctype.h>
 #include <time.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -14,9 +14,6 @@
 #include<pthread.h>
 #include <netinet/tcp.h>
 
-
-#define FIVE_GB_IN_BYTES (5ULL*1024ULL * 1024ULL * 1024ULL)
-#define MAX_FILENAME_LEN FIVE_GB_IN_BYTES
 #define STORAGE_DIRECTORY "./clientfiles/"
 char salt[] = "12";
 struct FileInfo {
@@ -38,7 +35,7 @@ void displayMenu() {
     printf("3. Display All Files\n");
     printf("4. Display my Uploaded Files\n");
     printf("5. Remove File\n");
-    printf("6. Display my Downloaded Files\n");
+    printf("6. Check Download History\n");
     printf("7. Manage Account (Change Password)\n");
     printf("8. Exit\n");
     printf("Enter your choice: ");
@@ -336,6 +333,8 @@ int main() {
                         }
 
                         int bytes_read;
+                        double upload_percentage = 0.0;
+                        
                         while ((bytes_read = fread(buffer, 1, sizeof(buffer), file1)) > 0) {
                             send(client_socket, buffer, bytes_read,0);
 
@@ -345,6 +344,8 @@ int main() {
                             if (elapsed_time >= 1.0) {
                                 double time_elapsed=(double)(current_time - time_start) / CLOCKS_PER_SEC;
                                 double upload_speed = ftell(file1) / time_elapsed;
+                                upload_percentage = ((double)ftell(file1) / (double)(file_size1)) * 100.0;
+                                printf("Upload Percentage: %.2f%%\n",upload_percentage);
                                 printf("Upload Speed: %.2f bytes/second\n", upload_speed);
                                 start_time = clock();
                             }
